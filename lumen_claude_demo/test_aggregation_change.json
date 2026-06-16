@@ -1,0 +1,10 @@
+{
+  "test": "automated_pipeline_validation",
+  "timestamp": "2026-06-16T10:30:00Z",
+  "author": "syed.zyad@lumendata.com",
+  "change_description": "Test: Updated monthly sales aggregation with new discount logic",
+  "affected_tables": [
+    "dev_gold.reporting.agg_monthly_sales",
+    "dev_gold.reporting.agg_category_trends"
+  ]
+}
