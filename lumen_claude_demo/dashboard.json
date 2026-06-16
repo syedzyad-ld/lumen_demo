@@ -1,0 +1,545 @@
+{
+  "datasets": [
+    {
+      "name": "ds_kpi_totals",
+      "displayName": "KPI Totals",
+      "query": "SELECT ROUND(SUM(total_revenue), 2) as total_revenue, ROUND(SUM(total_profit), 2) as total_profit, SUM(total_orders) as total_orders, ROUND(AVG(avg_profit_margin) * 100, 1) as avg_profit_margin_pct FROM dev_gold.reporting.agg_monthly_sales"
+    },
+    {
+      "name": "ds_monthly_revenue",
+      "displayName": "Monthly Revenue Trend",
+      "query": "SELECT CAST(year AS STRING) as year, month, month_name, ROUND(total_revenue, 2) as total_revenue, ROUND(total_profit, 2) as total_profit FROM dev_gold.reporting.agg_monthly_sales ORDER BY year, month"
+    },
+    {
+      "name": "ds_regional_summary",
+      "displayName": "Regional Summary",
+      "query": "SELECT region, manager_name, ROUND(total_revenue, 2) as total_revenue, ROUND(total_profit, 2) as total_profit, total_orders, total_customers, ROUND(avg_profit_margin * 100, 1) as avg_profit_margin_pct, ROUND(revenue_per_customer, 2) as revenue_per_customer FROM dev_gold.reporting.agg_regional_summary ORDER BY total_revenue DESC"
+    },
+    {
+      "name": "ds_customer_segments",
+      "displayName": "Customer Segments",
+      "query": "SELECT segment, COUNT(*) as customer_count, ROUND(SUM(lifetime_revenue), 2) as segment_revenue FROM dev_gold.reporting.agg_customer_lifetime_value GROUP BY segment ORDER BY segment_revenue DESC"
+    },
+    {
+      "name": "ds_top_products",
+      "displayName": "Top 10 Products by Revenue",
+      "query": "SELECT product_name, category, ROUND(total_revenue, 2) as total_revenue, ROUND(total_profit, 2) as total_profit, total_units_sold, ROUND(avg_profit_margin * 100, 1) as margin_pct FROM dev_gold.reporting.agg_product_performance ORDER BY total_revenue DESC LIMIT 10"
+    },
+    {
+      "name": "ds_category_trends",
+      "displayName": "Category Quarterly Trends",
+      "query": "SELECT CAST(year AS STRING) as year, CONCAT('Q', CAST(quarter AS STRING)) as quarter_label, category, ROUND(total_revenue, 2) as total_revenue FROM dev_gold.reporting.agg_category_trends ORDER BY year, quarter, category"
+    },
+    {
+      "name": "ds_product_returns",
+      "displayName": "Top Return Rate Products",
+      "query": "SELECT product_name, ROUND(return_rate * 100, 1) as return_rate_pct, total_returns FROM dev_gold.reporting.agg_product_performance WHERE total_returns > 0 ORDER BY return_rate DESC LIMIT 10"
+    },
+    {
+      "name": "ds_category_margins",
+      "displayName": "Sub-Category Margins",
+      "query": "SELECT category, sub_category, ROUND(AVG(avg_profit_margin) * 100, 1) as avg_margin_pct FROM dev_gold.reporting.agg_category_trends GROUP BY category, sub_category ORDER BY avg_margin_pct DESC"
+    },
+    {
+      "name": "ds_product_table",
+      "displayName": "Product Performance Table",
+      "query": "SELECT revenue_rank, product_name, category, sub_category, ROUND(total_revenue, 2) as total_revenue, ROUND(total_profit, 2) as total_profit, total_units_sold, ROUND(avg_profit_margin * 100, 1) as margin_pct, total_returns, ROUND(return_rate * 100, 1) as return_rate_pct FROM dev_gold.reporting.agg_product_performance ORDER BY revenue_rank LIMIT 20"
+    },
+    {
+      "name": "ds_ltv_tiers",
+      "displayName": "Customer LTV Tiers",
+      "query": "SELECT ltv_tier, COUNT(*) as customer_count, ROUND(AVG(lifetime_revenue), 2) as avg_ltv FROM dev_gold.reporting.agg_customer_lifetime_value GROUP BY ltv_tier ORDER BY avg_ltv DESC"
+    },
+    {
+      "name": "ds_top_customers",
+      "displayName": "Top 15 Customers",
+      "query": "SELECT customer_name, segment, ltv_tier, ROUND(lifetime_revenue, 2) as lifetime_revenue, ROUND(lifetime_profit, 2) as lifetime_profit, total_orders, ROUND(avg_order_value, 2) as avg_order_value, ROUND(return_rate * 100, 1) as return_rate_pct FROM dev_gold.reporting.agg_customer_lifetime_value ORDER BY lifetime_revenue DESC LIMIT 15"
+    },
+    {
+      "name": "ds_shipping",
+      "displayName": "Shipping Analysis",
+      "query": "SELECT ship_mode, ship_mode_description, ROUND(total_revenue, 2) as total_revenue, total_orders, ROUND(avg_delivery_days, 1) as avg_delivery_days, ROUND(avg_profit_margin * 100, 1) as margin_pct, ROUND(revenue_share_pct, 1) as revenue_share_pct, ROUND(order_share_pct, 1) as order_share_pct FROM dev_gold.reporting.agg_shipping_analysis ORDER BY total_revenue DESC"
+    },
+    {
+      "name": "ds_monthly_orders",
+      "displayName": "Monthly Orders Volume",
+      "query": "SELECT CAST(year AS STRING) as year, month, month_name, total_orders, total_units_sold FROM dev_gold.reporting.agg_monthly_sales ORDER BY year, month"
+    },
+    {
+      "name": "ds_discount_profit",
+      "displayName": "Discount vs Profit Margin",
+      "query": "SELECT CAST(year AS STRING) as year, month, ROUND(avg_discount * 100, 1) as avg_discount_pct, ROUND(avg_profit_margin * 100, 1) as avg_margin_pct FROM dev_gold.reporting.agg_monthly_sales ORDER BY year, month"
+    }
+  ],
+  "pages": [
+    {
+      "name": "executive_overview",
+      "displayName": "Executive Overview",
+      "layout": [
+        {
+          "widget": {
+            "name": "header_exec",
+            "textbox_spec": "# 📊 Executive Overview"
+          },
+          "position": {"x": 0, "y": 0, "width": 12, "height": 1}
+        },
+        {
+          "widget": {
+            "name": "kpi_revenue",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_kpi_totals", "fields": [{"name": "total_revenue", "expression": "`total_revenue`"}], "disaggregated": true}}],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {"fieldName": "total_revenue", "displayName": "Total Revenue ($)"}
+              },
+              "frame": {"showTitle": true, "title": "Total Revenue"}
+            }
+          },
+          "position": {"x": 0, "y": 1, "width": 3, "height": 3}
+        },
+        {
+          "widget": {
+            "name": "kpi_profit",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_kpi_totals", "fields": [{"name": "total_profit", "expression": "`total_profit`"}], "disaggregated": true}}],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {"fieldName": "total_profit", "displayName": "Total Profit ($)"}
+              },
+              "frame": {"showTitle": true, "title": "Total Profit"}
+            }
+          },
+          "position": {"x": 3, "y": 1, "width": 3, "height": 3}
+        },
+        {
+          "widget": {
+            "name": "kpi_orders",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_kpi_totals", "fields": [{"name": "total_orders", "expression": "`total_orders`"}], "disaggregated": true}}],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {"fieldName": "total_orders", "displayName": "Total Orders"}
+              },
+              "frame": {"showTitle": true, "title": "Total Orders"}
+            }
+          },
+          "position": {"x": 6, "y": 1, "width": 3, "height": 3}
+        },
+        {
+          "widget": {
+            "name": "kpi_margin",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_kpi_totals", "fields": [{"name": "avg_profit_margin_pct", "expression": "`avg_profit_margin_pct`"}], "disaggregated": true}}],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {"fieldName": "avg_profit_margin_pct", "displayName": "Avg Margin (%)"}
+              },
+              "frame": {"showTitle": true, "title": "Avg Profit Margin %"}
+            }
+          },
+          "position": {"x": 9, "y": 1, "width": 3, "height": 3}
+        },
+        {
+          "widget": {
+            "name": "monthly_revenue_line",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_monthly_revenue", "fields": [{"name": "month", "expression": "`month`"}, {"name": "total_revenue", "expression": "`total_revenue`"}, {"name": "year", "expression": "`year`"}], "disaggregated": true}}],
+            "spec": {
+              "version": 2,
+              "widgetType": "line",
+              "encodings": {
+                "x": {"fieldName": "month", "scale": {"type": "ordinal"}, "displayName": "Month"},
+                "y": {"fieldName": "total_revenue", "scale": {"type": "quantitative"}, "displayName": "Revenue ($)"},
+                "color": {"fieldName": "year", "scale": {"type": "categorical"}, "displayName": "Year"}
+              },
+              "frame": {"showTitle": true, "title": "Monthly Revenue Trend (by Year)"}
+            }
+          },
+          "position": {"x": 0, "y": 4, "width": 8, "height": 5}
+        },
+        {
+          "widget": {
+            "name": "segment_pie",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_customer_segments", "fields": [{"name": "segment", "expression": "`segment`"}, {"name": "customer_count", "expression": "`customer_count`"}], "disaggregated": true}}],
+            "spec": {
+              "version": 2,
+              "widgetType": "pie",
+              "encodings": {
+                "angle": {"fieldName": "customer_count", "displayName": "Customers"},
+                "color": {"fieldName": "segment", "scale": {"type": "categorical"}, "displayName": "Segment"}
+              },
+              "frame": {"showTitle": true, "title": "Customer Segments"}
+            }
+          },
+          "position": {"x": 8, "y": 4, "width": 4, "height": 5}
+        },
+        {
+          "widget": {
+            "name": "region_bar",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_regional_summary", "fields": [{"name": "region", "expression": "`region`"}, {"name": "total_revenue", "expression": "`total_revenue`"}], "disaggregated": true}}],
+            "spec": {
+              "version": 2,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {"fieldName": "region", "scale": {"type": "ordinal"}, "displayName": "Region"},
+                "y": {"fieldName": "total_revenue", "scale": {"type": "quantitative"}, "displayName": "Revenue ($)"}
+              },
+              "frame": {"showTitle": true, "title": "Revenue by Region"}
+            }
+          },
+          "position": {"x": 0, "y": 9, "width": 6, "height": 4}
+        },
+        {
+          "widget": {
+            "name": "monthly_profit_line",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_monthly_revenue", "fields": [{"name": "month", "expression": "`month`"}, {"name": "total_profit", "expression": "`total_profit`"}, {"name": "year", "expression": "`year`"}], "disaggregated": true}}],
+            "spec": {
+              "version": 2,
+              "widgetType": "line",
+              "encodings": {
+                "x": {"fieldName": "month", "scale": {"type": "ordinal"}, "displayName": "Month"},
+                "y": {"fieldName": "total_profit", "scale": {"type": "quantitative"}, "displayName": "Profit ($)"},
+                "color": {"fieldName": "year", "scale": {"type": "categorical"}, "displayName": "Year"}
+              },
+              "frame": {"showTitle": true, "title": "Monthly Profit Trend (by Year)"}
+            }
+          },
+          "position": {"x": 6, "y": 9, "width": 6, "height": 4}
+        }
+      ]
+    },
+    {
+      "name": "sales_product",
+      "displayName": "Sales & Product Analytics",
+      "layout": [
+        {
+          "widget": {
+            "name": "header_sales",
+            "textbox_spec": "# 🛠️ Sales & Product Analytics"
+          },
+          "position": {"x": 0, "y": 0, "width": 12, "height": 1}
+        },
+        {
+          "widget": {
+            "name": "top_products_bar",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_top_products", "fields": [{"name": "product_name", "expression": "`product_name`"}, {"name": "total_revenue", "expression": "`total_revenue`"}], "disaggregated": true}}],
+            "spec": {
+              "version": 2,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {"fieldName": "total_revenue", "scale": {"type": "quantitative"}, "displayName": "Revenue ($)"},
+                "y": {"fieldName": "product_name", "scale": {"type": "ordinal"}, "displayName": "Product"}
+              },
+              "frame": {"showTitle": true, "title": "Top 10 Products by Revenue"}
+            }
+          },
+          "position": {"x": 0, "y": 1, "width": 6, "height": 6}
+        },
+        {
+          "widget": {
+            "name": "category_trends_line",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_category_trends", "fields": [{"name": "quarter_label", "expression": "`quarter_label`"}, {"name": "total_revenue", "expression": "`total_revenue`"}, {"name": "category", "expression": "`category`"}], "disaggregated": true}}],
+            "spec": {
+              "version": 2,
+              "widgetType": "line",
+              "encodings": {
+                "x": {"fieldName": "quarter_label", "scale": {"type": "ordinal"}, "displayName": "Quarter"},
+                "y": {"fieldName": "total_revenue", "scale": {"type": "quantitative"}, "displayName": "Revenue ($)"},
+                "color": {"fieldName": "category", "scale": {"type": "categorical"}, "displayName": "Category"}
+              },
+              "frame": {"showTitle": true, "title": "Category Revenue by Quarter"}
+            }
+          },
+          "position": {"x": 6, "y": 1, "width": 6, "height": 6}
+        },
+        {
+          "widget": {
+            "name": "return_rate_bar",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_product_returns", "fields": [{"name": "product_name", "expression": "`product_name`"}, {"name": "return_rate_pct", "expression": "`return_rate_pct`"}], "disaggregated": true}}],
+            "spec": {
+              "version": 2,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {"fieldName": "return_rate_pct", "scale": {"type": "quantitative"}, "displayName": "Return Rate (%)"},
+                "y": {"fieldName": "product_name", "scale": {"type": "ordinal"}, "displayName": "Product"}
+              },
+              "frame": {"showTitle": true, "title": "Highest Return Rate Products"}
+            }
+          },
+          "position": {"x": 0, "y": 7, "width": 6, "height": 5}
+        },
+        {
+          "widget": {
+            "name": "category_margins_bar",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_category_margins", "fields": [{"name": "sub_category", "expression": "`sub_category`"}, {"name": "avg_margin_pct", "expression": "`avg_margin_pct`"}, {"name": "category", "expression": "`category`"}], "disaggregated": true}}],
+            "spec": {
+              "version": 2,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {"fieldName": "sub_category", "scale": {"type": "ordinal"}, "displayName": "Sub-Category"},
+                "y": {"fieldName": "avg_margin_pct", "scale": {"type": "quantitative"}, "displayName": "Profit Margin (%)"},
+                "color": {"fieldName": "category", "scale": {"type": "categorical"}, "displayName": "Category"}
+              },
+              "frame": {"showTitle": true, "title": "Profit Margins by Sub-Category"}
+            }
+          },
+          "position": {"x": 6, "y": 7, "width": 6, "height": 5}
+        },
+        {
+          "widget": {
+            "name": "product_table",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_product_table", "fields": [{"name": "revenue_rank", "expression": "`revenue_rank`"}, {"name": "product_name", "expression": "`product_name`"}, {"name": "category", "expression": "`category`"}, {"name": "total_revenue", "expression": "`total_revenue`"}, {"name": "total_profit", "expression": "`total_profit`"}, {"name": "total_units_sold", "expression": "`total_units_sold`"}, {"name": "margin_pct", "expression": "`margin_pct`"}, {"name": "return_rate_pct", "expression": "`return_rate_pct`"}], "disaggregated": true}}],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {"fieldName": "revenue_rank", "displayName": "Rank"},
+                  {"fieldName": "product_name", "displayName": "Product"},
+                  {"fieldName": "category", "displayName": "Category"},
+                  {"fieldName": "total_revenue", "displayName": "Revenue ($)"},
+                  {"fieldName": "total_profit", "displayName": "Profit ($)"},
+                  {"fieldName": "total_units_sold", "displayName": "Units"},
+                  {"fieldName": "margin_pct", "displayName": "Margin %"},
+                  {"fieldName": "return_rate_pct", "displayName": "Return %"}
+                ]
+              },
+              "frame": {"showTitle": true, "title": "Product Performance Details (Top 20)"}
+            }
+          },
+          "position": {"x": 0, "y": 12, "width": 12, "height": 6}
+        }
+      ]
+    },
+    {
+      "name": "customer_regional",
+      "displayName": "Customer & Regional Intelligence",
+      "layout": [
+        {
+          "widget": {
+            "name": "header_customer",
+            "textbox_spec": "# 👥 Customer & Regional Intelligence"
+          },
+          "position": {"x": 0, "y": 0, "width": 12, "height": 1}
+        },
+        {
+          "widget": {
+            "name": "ltv_tier_pie",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_ltv_tiers", "fields": [{"name": "ltv_tier", "expression": "`ltv_tier`"}, {"name": "customer_count", "expression": "`customer_count`"}], "disaggregated": true}}],
+            "spec": {
+              "version": 2,
+              "widgetType": "pie",
+              "encodings": {
+                "angle": {"fieldName": "customer_count", "displayName": "Customers"},
+                "color": {"fieldName": "ltv_tier", "scale": {"type": "categorical"}, "displayName": "LTV Tier"}
+              },
+              "frame": {"showTitle": true, "title": "Customer LTV Tier Distribution"}
+            }
+          },
+          "position": {"x": 0, "y": 1, "width": 4, "height": 5}
+        },
+        {
+          "widget": {
+            "name": "top_states_bar",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_regional_summary", "fields": [{"name": "region", "expression": "`region`"}, {"name": "total_revenue", "expression": "`total_revenue`"}, {"name": "total_profit", "expression": "`total_profit`"}], "disaggregated": true}}],
+            "spec": {
+              "version": 2,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {"fieldName": "total_revenue", "scale": {"type": "quantitative"}, "displayName": "Revenue ($)"},
+                "y": {"fieldName": "region", "scale": {"type": "ordinal"}, "displayName": "Region"}
+              },
+              "frame": {"showTitle": true, "title": "Revenue by Region (Horizontal)"}
+            }
+          },
+          "position": {"x": 4, "y": 1, "width": 4, "height": 5}
+        },
+        {
+          "widget": {
+            "name": "rev_per_customer",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_regional_summary", "fields": [{"name": "region", "expression": "`region`"}, {"name": "revenue_per_customer", "expression": "`revenue_per_customer`"}], "disaggregated": true}}],
+            "spec": {
+              "version": 2,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {"fieldName": "region", "scale": {"type": "ordinal"}, "displayName": "Region"},
+                "y": {"fieldName": "revenue_per_customer", "scale": {"type": "quantitative"}, "displayName": "Revenue per Customer ($)"}
+              },
+              "frame": {"showTitle": true, "title": "Revenue per Customer by Region"}
+            }
+          },
+          "position": {"x": 8, "y": 1, "width": 4, "height": 5}
+        },
+        {
+          "widget": {
+            "name": "customer_table",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_top_customers", "fields": [{"name": "customer_name", "expression": "`customer_name`"}, {"name": "segment", "expression": "`segment`"}, {"name": "ltv_tier", "expression": "`ltv_tier`"}, {"name": "lifetime_revenue", "expression": "`lifetime_revenue`"}, {"name": "lifetime_profit", "expression": "`lifetime_profit`"}, {"name": "total_orders", "expression": "`total_orders`"}, {"name": "avg_order_value", "expression": "`avg_order_value`"}, {"name": "return_rate_pct", "expression": "`return_rate_pct`"}], "disaggregated": true}}],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {"fieldName": "customer_name", "displayName": "Customer"},
+                  {"fieldName": "segment", "displayName": "Segment"},
+                  {"fieldName": "ltv_tier", "displayName": "LTV Tier"},
+                  {"fieldName": "lifetime_revenue", "displayName": "Lifetime Revenue"},
+                  {"fieldName": "lifetime_profit", "displayName": "Lifetime Profit"},
+                  {"fieldName": "total_orders", "displayName": "Orders"},
+                  {"fieldName": "avg_order_value", "displayName": "Avg Order"},
+                  {"fieldName": "return_rate_pct", "displayName": "Return %"}
+                ]
+              },
+              "frame": {"showTitle": true, "title": "Top 15 Customers by Lifetime Value"}
+            }
+          },
+          "position": {"x": 0, "y": 6, "width": 12, "height": 5}
+        },
+        {
+          "widget": {
+            "name": "regional_mgr_table",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_regional_summary", "fields": [{"name": "manager_name", "expression": "`manager_name`"}, {"name": "region", "expression": "`region`"}, {"name": "total_revenue", "expression": "`total_revenue`"}, {"name": "total_profit", "expression": "`total_profit`"}, {"name": "total_customers", "expression": "`total_customers`"}, {"name": "total_orders", "expression": "`total_orders`"}, {"name": "avg_profit_margin_pct", "expression": "`avg_profit_margin_pct`"}], "disaggregated": true}}],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {"fieldName": "manager_name", "displayName": "Manager"},
+                  {"fieldName": "region", "displayName": "Region"},
+                  {"fieldName": "total_revenue", "displayName": "Revenue"},
+                  {"fieldName": "total_profit", "displayName": "Profit"},
+                  {"fieldName": "total_customers", "displayName": "Customers"},
+                  {"fieldName": "total_orders", "displayName": "Orders"},
+                  {"fieldName": "avg_profit_margin_pct", "displayName": "Margin %"}
+                ]
+              },
+              "frame": {"showTitle": true, "title": "Regional Manager Performance"}
+            }
+          },
+          "position": {"x": 0, "y": 11, "width": 12, "height": 4}
+        }
+      ]
+    },
+    {
+      "name": "shipping_operations",
+      "displayName": "Shipping & Operations",
+      "layout": [
+        {
+          "widget": {
+            "name": "header_shipping",
+            "textbox_spec": "# 🚚 Shipping & Operations"
+          },
+          "position": {"x": 0, "y": 0, "width": 12, "height": 1}
+        },
+        {
+          "widget": {
+            "name": "delivery_days_bar",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_shipping", "fields": [{"name": "ship_mode", "expression": "`ship_mode`"}, {"name": "avg_delivery_days", "expression": "`avg_delivery_days`"}], "disaggregated": true}}],
+            "spec": {
+              "version": 2,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {"fieldName": "ship_mode", "scale": {"type": "ordinal"}, "displayName": "Ship Mode"},
+                "y": {"fieldName": "avg_delivery_days", "scale": {"type": "quantitative"}, "displayName": "Avg Delivery Days"}
+              },
+              "frame": {"showTitle": true, "title": "Average Delivery Days by Ship Mode"}
+            }
+          },
+          "position": {"x": 0, "y": 1, "width": 4, "height": 4}
+        },
+        {
+          "widget": {
+            "name": "shipping_pie",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_shipping", "fields": [{"name": "ship_mode", "expression": "`ship_mode`"}, {"name": "revenue_share_pct", "expression": "`revenue_share_pct`"}], "disaggregated": true}}],
+            "spec": {
+              "version": 2,
+              "widgetType": "pie",
+              "encodings": {
+                "angle": {"fieldName": "revenue_share_pct", "displayName": "Revenue Share %"},
+                "color": {"fieldName": "ship_mode", "scale": {"type": "categorical"}, "displayName": "Ship Mode"}
+              },
+              "frame": {"showTitle": true, "title": "Revenue Share by Ship Mode"}
+            }
+          },
+          "position": {"x": 4, "y": 1, "width": 4, "height": 4}
+        },
+        {
+          "widget": {
+            "name": "shipping_margin_bar",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_shipping", "fields": [{"name": "ship_mode", "expression": "`ship_mode`"}, {"name": "margin_pct", "expression": "`margin_pct`"}], "disaggregated": true}}],
+            "spec": {
+              "version": 2,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {"fieldName": "ship_mode", "scale": {"type": "ordinal"}, "displayName": "Ship Mode"},
+                "y": {"fieldName": "margin_pct", "scale": {"type": "quantitative"}, "displayName": "Profit Margin (%)"}
+              },
+              "frame": {"showTitle": true, "title": "Profit Margin by Ship Mode"}
+            }
+          },
+          "position": {"x": 8, "y": 1, "width": 4, "height": 4}
+        },
+        {
+          "widget": {
+            "name": "monthly_orders_line",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_monthly_orders", "fields": [{"name": "month", "expression": "`month`"}, {"name": "total_orders", "expression": "`total_orders`"}, {"name": "year", "expression": "`year`"}], "disaggregated": true}}],
+            "spec": {
+              "version": 2,
+              "widgetType": "line",
+              "encodings": {
+                "x": {"fieldName": "month", "scale": {"type": "ordinal"}, "displayName": "Month"},
+                "y": {"fieldName": "total_orders", "scale": {"type": "quantitative"}, "displayName": "Orders"},
+                "color": {"fieldName": "year", "scale": {"type": "categorical"}, "displayName": "Year"}
+              },
+              "frame": {"showTitle": true, "title": "Monthly Order Volume (by Year)"}
+            }
+          },
+          "position": {"x": 0, "y": 5, "width": 6, "height": 4}
+        },
+        {
+          "widget": {
+            "name": "discount_profit_line",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_discount_profit", "fields": [{"name": "month", "expression": "`month`"}, {"name": "avg_margin_pct", "expression": "`avg_margin_pct`"}, {"name": "year", "expression": "`year`"}], "disaggregated": true}}],
+            "spec": {
+              "version": 2,
+              "widgetType": "line",
+              "encodings": {
+                "x": {"fieldName": "month", "scale": {"type": "ordinal"}, "displayName": "Month"},
+                "y": {"fieldName": "avg_margin_pct", "scale": {"type": "quantitative"}, "displayName": "Profit Margin (%)"},
+                "color": {"fieldName": "year", "scale": {"type": "categorical"}, "displayName": "Year"}
+              },
+              "frame": {"showTitle": true, "title": "Profit Margin Trend (by Year)"}
+            }
+          },
+          "position": {"x": 6, "y": 5, "width": 6, "height": 4}
+        },
+        {
+          "widget": {
+            "name": "shipping_table",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_shipping", "fields": [{"name": "ship_mode", "expression": "`ship_mode`"}, {"name": "ship_mode_description", "expression": "`ship_mode_description`"}, {"name": "total_orders", "expression": "`total_orders`"}, {"name": "total_revenue", "expression": "`total_revenue`"}, {"name": "avg_delivery_days", "expression": "`avg_delivery_days`"}, {"name": "margin_pct", "expression": "`margin_pct`"}, {"name": "revenue_share_pct", "expression": "`revenue_share_pct`"}, {"name": "order_share_pct", "expression": "`order_share_pct`"}], "disaggregated": true}}],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {"fieldName": "ship_mode", "displayName": "Ship Mode"},
+                  {"fieldName": "ship_mode_description", "displayName": "Description"},
+                  {"fieldName": "total_orders", "displayName": "Orders"},
+                  {"fieldName": "total_revenue", "displayName": "Revenue ($)"},
+                  {"fieldName": "avg_delivery_days", "displayName": "Avg Days"},
+                  {"fieldName": "margin_pct", "displayName": "Margin %"},
+                  {"fieldName": "revenue_share_pct", "displayName": "Rev Share %"},
+                  {"fieldName": "order_share_pct", "displayName": "Order Share %"}
+                ]
+              },
+              "frame": {"showTitle": true, "title": "Shipping Analysis Detail"}
+            }
+          },
+          "position": {"x": 0, "y": 9, "width": 12, "height": 5}
+        }
+      ]
+    }
+  ]
+}

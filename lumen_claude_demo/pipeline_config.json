@@ -1,0 +1,23 @@
+{
+  "name": "Auto PR Pipeline Configuration",
+  "description": "Configuration for the automated branch/PR workflow",
+  "settings": {
+    "github": {
+      "repo": "syedzyad-ld/lumen_demo",
+      "base_branch": "main",
+      "branch_prefix": "feature/",
+      "require_approvals": 1
+    },
+    "databricks": {
+      "secret_scope": "github",
+      "secret_key": "pat_token",
+      "workspace_path": "/Repos/syed.zyad@lumendata.com/lumen_demo"
+    },
+    "automation": {
+      "auto_create_pr": true,
+      "pr_labels": ["auto-pr", "needs-review"],
+      "commit_message_prefix": "[Auto]",
+      "branch_naming": "feature/{user}/{timestamp}"
+    }
+  }
+}
