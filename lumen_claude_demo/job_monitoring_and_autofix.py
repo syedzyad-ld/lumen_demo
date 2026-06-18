@@ -1,12 +1,12 @@
 # Databricks notebook source
 # MAGIC %md
 # MAGIC # Job Monitoring, Root Cause Analysis & Auto-Fix
-# MAGIC **Purpose:** Monitor all Databricks jobs, identify failures, diagnose root causes, generate fixes, and submit them via GitHub PR for approval.
+# MAGIC **Purpose:** Monitor all Databricks jobs, identify failures, diagnose root causes, generate precise fixes, and submit them via GitHub PR for approval.
 # MAGIC
 # MAGIC **Workflow:**
 # MAGIC 1. Fetch all jobs and their latest run status
-# MAGIC 2. Identify failed jobs and extract error details
-# MAGIC 3. AI-powered root cause analysis and fix recommendation
+# MAGIC 2. Identify failed jobs and extract FULL error details from multiple API sources
+# MAGIC 3. Intelligent error parsing — reads exact error text and generates a targeted fix
 # MAGIC 4. Generate monitoring report
 # MAGIC 5. Auto-commit fix to GitHub feature branch → Auto-PR → Admin approves merge
 # MAGIC 6. Summary with PR links
@@ -21,6 +21,7 @@
 import requests
 import json
 import base64
+import re
 from datetime import datetime, timedelta
 from pyspark.sql import Row
 from pyspark.sql.functions import col, lit, current_timestamp
@@ -48,6 +49,17 @@ def api_get(endpoint, params=None):
     response = requests.get(url, headers=HEADERS, params=params)
     response.raise_for_status()
     return response.json()
+
+def api_get_safe(endpoint, params=None):
+    """GET that returns None on error instead of raising"""
+    try:
+        url = f"{WORKSPACE_URL}{endpoint}"
+        response = requests.get(url, headers=HEADERS, params=params)
+        if response.status_code == 200:
+            return response.json()
+        return None
+    except:
+        return None
 
 def api_post(endpoint, data=None):
     url = f"{WORKSPACE_URL}{endpoint}"
@@ -110,14 +122,21 @@ for job in all_jobs:
             duration_str = f"{duration_ms // 60000}m {(duration_ms % 60000) // 1000}s"
             error_msg = state.get("state_message", "")
 
-            # Get notebook path from task config
+            # Get notebook path from task config (handle both single-task and multi-task jobs)
             notebook_path = ""
+            task_run_ids = []
             tasks = latest_run.get("tasks", [])
             if tasks:
                 for task in tasks:
                     if task.get("notebook_task"):
                         notebook_path = task["notebook_task"].get("notebook_path", "")
-                        break
+                    # Collect task-level run IDs for error extraction
+                    if task.get("run_id"):
+                        task_run_ids.append(task["run_id"])
+                    # Also get error from task state
+                    task_state = task.get("state", {})
+                    if task_state.get("result_state") == "FAILED" and not error_msg:
+                        error_msg = task_state.get("state_message", "")
             elif latest_run.get("task", {}).get("notebook_task"):
                 notebook_path = latest_run["task"]["notebook_task"].get("notebook_path", "")
 
@@ -125,10 +144,11 @@ for job in all_jobs:
                 "job_id": job_id,
                 "job_name": job_name,
                 "run_id": run_id,
+                "task_run_ids": task_run_ids,
                 "status": result_state,
                 "start_time": start_time,
                 "duration": duration_str,
-                "error_message": error_msg[:200] if error_msg else "",
+                "error_message": error_msg[:500] if error_msg else "",
                 "notebook_path": notebook_path
             })
         else:
@@ -136,6 +156,7 @@ for job in all_jobs:
                 "job_id": job_id,
                 "job_name": job_name,
                 "run_id": None,
+                "task_run_ids": [],
                 "status": "NO_RUNS",
                 "start_time": "N/A",
                 "duration": "N/A",
@@ -147,10 +168,11 @@ for job in all_jobs:
             "job_id": job_id,
             "job_name": job_name,
             "run_id": None,
+            "task_run_ids": [],
             "status": "ERROR_FETCHING",
             "start_time": "N/A",
             "duration": "N/A",
-            "error_message": str(e)[:200],
+            "error_message": str(e)[:500],
             "notebook_path": ""
         })
 
@@ -162,13 +184,15 @@ for job in job_status_list:
     print(f"[{icon}] {job['job_name']:<38} {job['status']:<15} {job['start_time']:<20} {job['duration']:<12}")
 
 if job_status_list:
-    status_df = spark.createDataFrame([Row(**item) for item in job_status_list])
+    display_list = [{k: v for k, v in item.items() if k != "task_run_ids"} for item in job_status_list]
+    status_df = spark.createDataFrame([Row(**item) for item in display_list])
     display(status_df.select("job_id", "job_name", "status", "start_time", "duration", "error_message"))
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Cell 3: Identify Failed Jobs & Extract Error Details
+# MAGIC ## Cell 3: Extract FULL Error Details (Multi-Source)
+# MAGIC Pulls error from: run state_message, get-output API, task-level outputs, and cluster logs.
 
 # COMMAND ----------
 
@@ -189,42 +213,49 @@ for job in failed_jobs:
         "notebook_path": job["notebook_path"],
         "error_message": job["error_message"],
         "full_error": "",
-        "error_type": "UNKNOWN",
         "notebook_content": ""
     }
 
-    try:
-        run_output = api_get("/api/2.1/jobs/runs/get-output", params={"run_id": job["run_id"]})
-        full_error = run_output.get("error", "")
-        error_trace = run_output.get("error_trace", "")
-        detail["full_error"] = error_trace if error_trace else full_error
+    # Source 1: state_message from run (already have it)
+    collected_errors = []
+    if job["error_message"]:
+        collected_errors.append(job["error_message"])
 
-        # Classify error type
-        error_text = (full_error + " " + error_trace).lower()
-        if "table_or_view_not_found" in error_text or "table not found" in error_text:
-            detail["error_type"] = "TABLE_NOT_FOUND"
-        elif "permission" in error_text or "access denied" in error_text:
-            detail["error_type"] = "PERMISSION_DENIED"
-        elif "modulenotfounderror" in error_text or "no module named" in error_text:
-            detail["error_type"] = "LIBRARY_NOT_FOUND"
-        elif "schema" in error_text or "cannot resolve" in error_text:
-            detail["error_type"] = "SCHEMA_MISMATCH"
-        elif "timeout" in error_text or "timed out" in error_text:
-            detail["error_type"] = "TIMEOUT"
-        elif "outofmemoryerror" in error_text:
-            detail["error_type"] = "OUT_OF_MEMORY"
-        elif "filenotfounderror" in error_text or "path does not exist" in error_text:
-            detail["error_type"] = "FILE_NOT_FOUND"
-        else:
-            detail["error_type"] = "PYTHON_ERROR"
+    # Source 2: get-output on top-level run_id (works for single-task jobs)
+    run_output = api_get_safe("/api/2.1/jobs/runs/get-output", params={"run_id": job["run_id"]})
+    if run_output:
+        if run_output.get("error"):
+            collected_errors.append(run_output["error"])
+        if run_output.get("error_trace"):
+            collected_errors.append(run_output["error_trace"])
 
-        print(f"  Error Type: {detail['error_type']}")
-        print(f"  Error: {detail['full_error'][:300]}")
-    except Exception as e:
-        detail["full_error"] = str(e)
-        print(f"  Could not fetch error details: {e}")
+    # Source 3: get-output on each task-level run_id (works for multi-task jobs)
+    for task_run_id in job.get("task_run_ids", []):
+        task_output = api_get_safe("/api/2.1/jobs/runs/get-output", params={"run_id": task_run_id})
+        if task_output:
+            if task_output.get("error"):
+                collected_errors.append(task_output["error"])
+            if task_output.get("error_trace"):
+                collected_errors.append(task_output["error_trace"])
 
-    # Get notebook source
+    # Source 4: Get run details for more state info
+    run_detail = api_get_safe("/api/2.1/jobs/runs/get", params={"run_id": job["run_id"]})
+    if run_detail:
+        # Check tasks within the run for errors
+        for task in run_detail.get("tasks", []):
+            task_state = task.get("state", {})
+            if task_state.get("state_message"):
+                collected_errors.append(task_state["state_message"])
+
+    # Combine all error sources, deduplicate
+    all_error_text = "\n---\n".join(list(dict.fromkeys([e for e in collected_errors if e.strip()])))
+    detail["full_error"] = all_error_text if all_error_text else "Error details could not be retrieved from API"
+
+    print(f"  Error sources found: {len(collected_errors)}")
+    print(f"  Full error ({len(detail['full_error'])} chars):")
+    print(f"  {detail['full_error'][:500]}")
+
+    # Get notebook source for context
     if job["notebook_path"]:
         try:
             export_resp = api_get("/api/2.0/workspace/export", params={
@@ -244,91 +275,224 @@ if not failed_jobs:
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Cell 4: Root Cause Analysis & Fix Recommendation
+# MAGIC ## Cell 4: Intelligent Root Cause Analysis & Fix Generation
+# MAGIC Reads the actual error text and generates a precise fix — not limited to predefined categories.
 
 # COMMAND ----------
 
-import re
-
-def analyze_and_recommend_fix(detail):
-    error_type = detail["error_type"]
-    error_text = detail["full_error"]
-    notebook_code = detail["notebook_content"]
-
+def intelligent_fix_generator(error_text, notebook_code):
+    """
+    Parse the actual error message and generate a specific fix.
+    This reads the exact error and produces a targeted remedy.
+    """
+    error_lower = error_text.lower()
     analysis = {
         "root_cause": "",
         "explanation": "",
         "recommended_fix": "",
         "fix_code": "",
+        "fix_location": "prepend",  # prepend = add at top, inline = modify existing code
         "severity": "HIGH",
-        "confidence": "MEDIUM"
+        "confidence": "HIGH"
     }
 
-    if error_type == "TABLE_NOT_FOUND":
-        table_match = re.search(r"table or view[`'\s]*([^\s`']+)", error_text, re.IGNORECASE)
-        missing_table = table_match.group(1) if table_match else "unknown"
-        analysis["root_cause"] = f"Missing table or view: {missing_table}"
-        analysis["explanation"] = f"Table '{missing_table}' does not exist. Upstream pipeline may not have run or table was dropped/renamed."
-        analysis["recommended_fix"] = "Add table existence check before reading"
-        analysis["fix_code"] = f'# AUTO-FIX: Table existence check\nif spark.catalog.tableExists("{missing_table}"):\n    df = spark.table("{missing_table}")\nelse:\n    raise Exception(f"Required table \'{missing_table}\' not found. Run upstream pipeline first.")'
-        analysis["confidence"] = "HIGH"
+    # --- Missing Python package / optional dependency ---
+    # Matches: "Missing optional dependency 'xlrd'", "No module named 'xxx'", "ModuleNotFoundError"
+    pkg_patterns = [
+        r"missing optional dependency ['\"]([^'\"]+)['\"]",
+        r"install ([a-zA-Z0-9_\-]+)\s*>=?\s*([0-9.]+)",
+        r"no module named ['\"]?([a-zA-Z0-9_\.\-]+)['\"]?",
+        r"modulenotfounderror.*?['\"]([a-zA-Z0-9_\.\-]+)['\"]",
+        r"import error.*?['\"]([a-zA-Z0-9_\.\-]+)['\"]",
+        r"pip or conda to install ([a-zA-Z0-9_\-]+)",
+    ]
+    for pattern in pkg_patterns:
+        match = re.search(pattern, error_text, re.IGNORECASE)
+        if match:
+            pkg_name = match.group(1).split(".")[0]  # Get top-level package
+            # Check for version requirement
+            version_match = re.search(rf"{pkg_name}\s*>=?\s*([0-9.]+)", error_text)
+            version_spec = f">={version_match.group(1)}" if version_match else ""
+            install_target = f"{pkg_name}{version_spec}" if version_spec else pkg_name
 
-    elif error_type == "LIBRARY_NOT_FOUND":
-        module_match = re.search(r"no module named ['\"]?([^\s'\"]+)", error_text, re.IGNORECASE)
-        missing_module = module_match.group(1) if module_match else "unknown"
-        analysis["root_cause"] = f"Missing Python library: {missing_module}"
-        analysis["explanation"] = f"Package '{missing_module}' not installed on cluster."
-        analysis["recommended_fix"] = f"Add %pip install {missing_module} at notebook start"
-        analysis["fix_code"] = f"%pip install {missing_module}"
-        analysis["confidence"] = "HIGH"
+            analysis["root_cause"] = f"Missing Python package: {pkg_name}"
+            analysis["explanation"] = f"The notebook requires '{pkg_name}' which is not installed on the cluster. Error: {error_text[:200]}"
+            analysis["recommended_fix"] = f"Install {install_target} at the beginning of the notebook"
+            analysis["fix_code"] = f"# AUTO-FIX: Install missing dependency\n%pip install {install_target}\ndbutils.library.restartPython()"
+            analysis["confidence"] = "HIGH"
+            return analysis
 
-    elif error_type == "PERMISSION_DENIED":
-        analysis["root_cause"] = "Insufficient permissions to access resource"
-        analysis["explanation"] = "Job owner lacks required GRANT on catalog/schema/table."
-        analysis["recommended_fix"] = "Grant appropriate permissions to the job service principal"
-        analysis["fix_code"] = "# PERMISSION FIX: Run as admin\n# GRANT ALL PRIVILEGES ON CATALOG <catalog> TO `service_principal`;"
+    # --- Table or view not found ---
+    table_patterns = [
+        r"table_or_view_not_found.*?[`'\"]([^`'\"]+)[`'\"]",
+        r"table or view ['\"`]?([^\s'\"`;]+)['\"`]? not found",
+        r"table not found:?\s*[`'\"]?([^\s`'\"]+)",
+        r"schema ['\"]?([^\s'\"]+)['\"]? not found",
+        r"database ['\"]?([^\s'\"]+)['\"]? not found",
+        r"catalog ['\"]?([^\s'\"]+)['\"]? does not exist",
+    ]
+    for pattern in table_patterns:
+        match = re.search(pattern, error_text, re.IGNORECASE)
+        if match:
+            missing_obj = match.group(1)
+            analysis["root_cause"] = f"Table/View/Schema not found: {missing_obj}"
+            analysis["explanation"] = f"The query references '{missing_obj}' which does not exist. The upstream pipeline may not have run, or the object was renamed/dropped."
+            analysis["recommended_fix"] = f"Add existence check for {missing_obj} before use"
+            analysis["fix_code"] = f'# AUTO-FIX: Validate object exists before use\ntry:\n    spark.sql("DESCRIBE {missing_obj}")\nexcept Exception as e:\n    raise Exception(f"Required object \'{missing_obj}\' not found. Ensure upstream pipeline has run. Error: {{e}}")'
+            analysis["confidence"] = "HIGH"
+            return analysis
+
+    # --- File/path not found ---
+    path_patterns = [
+        r"path does not exist:?\s*['\"]?([^\s'\"]+)",
+        r"filenotfounderror.*?['\"]([^'\"]+)['\"]",
+        r"no such file or directory:?\s*['\"]?([^\s'\"]+)",
+        r"java\.io\.filenotfoundexception:?\s*([^\s]+)",
+        r"input path ['\"]?([^'\"]+)['\"]? does not exist",
+    ]
+    for pattern in path_patterns:
+        match = re.search(pattern, error_text, re.IGNORECASE)
+        if match:
+            missing_path = match.group(1)
+            analysis["root_cause"] = f"File/Path not found: {missing_path}"
+            analysis["explanation"] = f"The path '{missing_path}' does not exist or is not accessible."
+            analysis["recommended_fix"] = f"Add path validation before reading"
+            analysis["fix_code"] = f'# AUTO-FIX: Validate path exists\nimport os\nsource_path = "{missing_path}"\nif not os.path.exists(source_path) and not source_path.startswith("dbfs:"):\n    # Check DBFS\n    try:\n        dbutils.fs.ls(source_path)\n    except Exception:\n        raise FileNotFoundError(f"Source path not found: {{source_path}}")\nprint(f"Path verified: {{source_path}}")'
+            analysis["confidence"] = "HIGH"
+            return analysis
+
+    # --- Permission / access denied ---
+    if any(kw in error_lower for kw in ["permission denied", "access denied", "not authorized", "forbidden", "insufficient privileges"]):
+        resource_match = re.search(r"(?:on|to|for|accessing)\s+[`'\"]?([^\s`'\"]+)", error_text, re.IGNORECASE)
+        resource = resource_match.group(1) if resource_match else "the resource"
+        analysis["root_cause"] = f"Permission denied on: {resource}"
+        analysis["explanation"] = f"The service principal or user running this job lacks access to '{resource}'."
+        analysis["recommended_fix"] = f"Grant required permissions"
+        analysis["fix_code"] = f'# AUTO-FIX: Permission issue - requires admin action\n# Run the following as catalog admin:\n# GRANT USE CATALOG ON CATALOG <catalog_name> TO `<principal>`;\n# GRANT USE SCHEMA ON SCHEMA <schema_name> TO `<principal>`;\n# GRANT SELECT ON TABLE {resource} TO `<principal>`;\nraise PermissionError("This notebook requires elevated permissions. Contact admin to grant access to: {resource}")'
         analysis["severity"] = "CRITICAL"
+        return analysis
 
-    elif error_type == "SCHEMA_MISMATCH":
-        analysis["root_cause"] = "Schema evolution conflict"
-        analysis["explanation"] = "Column types or names changed between source and target."
-        analysis["recommended_fix"] = "Enable schema merge on write"
-        analysis["fix_code"] = '# AUTO-FIX: Enable schema evolution\nspark.conf.set("spark.databricks.delta.schema.autoMerge.enabled", "true")'
-        analysis["confidence"] = "MEDIUM"
+    # --- Schema mismatch / column errors ---
+    schema_patterns = [
+        r"cannot resolve ['\"`]([^'\"]+)['\"`].*?given input columns",
+        r"column ['\"]?([^\s'\"]+)['\"]? does not exist",
+        r"analysisexception.*?cannot resolve.*?['\"`]([^'\"`]+)['\"`]",
+        r"schema mismatch",
+        r"cannot cast.*?from\s+(\w+)\s+to\s+(\w+)",
+    ]
+    for pattern in schema_patterns:
+        match = re.search(pattern, error_text, re.IGNORECASE)
+        if match:
+            col_info = match.group(1) if match.lastindex >= 1 else "unknown column"
+            analysis["root_cause"] = f"Schema mismatch: {col_info}"
+            analysis["explanation"] = f"Column '{col_info}' reference is invalid. Source schema may have changed."
+            analysis["recommended_fix"] = "Enable schema auto-merge and add column validation"
+            analysis["fix_code"] = f'# AUTO-FIX: Handle schema evolution\nspark.conf.set("spark.databricks.delta.schema.autoMerge.enabled", "true")\n# Validate columns before transformation\n# df.printSchema()  # Uncomment to inspect actual schema'
+            analysis["confidence"] = "MEDIUM"
+            return analysis
 
-    elif error_type == "TIMEOUT":
-        analysis["root_cause"] = "Operation timed out"
-        analysis["explanation"] = "Query or cluster startup exceeded time limit."
-        analysis["recommended_fix"] = "Optimize query or increase timeout"
-        analysis["fix_code"] = '# AUTO-FIX: Increase timeout and enable AQE\nspark.conf.set("spark.sql.adaptive.enabled", "true")\nspark.conf.set("spark.network.timeout", "600s")'
+    # --- Timeout errors ---
+    if any(kw in error_lower for kw in ["timed out", "timeout", "deadline exceeded", "cancelled due to timeout"]):
+        analysis["root_cause"] = "Operation timeout"
+        analysis["explanation"] = "The job exceeded its time limit. Query may be too heavy or cluster was slow to start."
+        analysis["recommended_fix"] = "Optimize query performance and increase timeout"
+        analysis["fix_code"] = '# AUTO-FIX: Performance optimization\nspark.conf.set("spark.sql.adaptive.enabled", "true")\nspark.conf.set("spark.sql.adaptive.coalescePartitions.enabled", "true")\nspark.conf.set("spark.sql.shuffle.partitions", "auto")\nspark.conf.set("spark.network.timeout", "800s")\nspark.conf.set("spark.sql.broadcastTimeout", "600")'
         analysis["severity"] = "MEDIUM"
+        return analysis
 
-    elif error_type == "OUT_OF_MEMORY":
-        analysis["root_cause"] = "Insufficient memory"
-        analysis["explanation"] = "Data volume exceeds cluster memory capacity."
-        analysis["recommended_fix"] = "Enable adaptive execution and increase partitions"
-        analysis["fix_code"] = '# AUTO-FIX: Memory optimization\nspark.conf.set("spark.sql.adaptive.enabled", "true")\nspark.conf.set("spark.sql.shuffle.partitions", "400")'
-        analysis["severity"] = "HIGH"
+    # --- Out of memory ---
+    if any(kw in error_lower for kw in ["outofmemoryerror", "out of memory", "java.lang.outofmemory", "gc overhead limit", "container killed by yarn"]):
+        analysis["root_cause"] = "Out of memory"
+        analysis["explanation"] = "Data volume exceeds available cluster memory."
+        analysis["recommended_fix"] = "Increase partitions, enable AQE, reduce data in memory"
+        analysis["fix_code"] = '# AUTO-FIX: Memory optimization\nspark.conf.set("spark.sql.adaptive.enabled", "true")\nspark.conf.set("spark.sql.shuffle.partitions", "800")\nspark.conf.set("spark.sql.files.maxPartitionBytes", "64mb")\nspark.conf.set("spark.memory.fraction", "0.8")\n# Consider: .repartition(200) before heavy joins'
+        analysis["severity"] = "CRITICAL"
+        return analysis
 
-    elif error_type == "FILE_NOT_FOUND":
-        path_match = re.search(r"['\"]([^'\"]*volumes[^'\"]*)['\"]", error_text, re.IGNORECASE)
-        missing_path = path_match.group(1) if path_match else "unknown path"
-        analysis["root_cause"] = f"File not found: {missing_path}"
-        analysis["explanation"] = "Source file missing or path changed."
-        analysis["recommended_fix"] = "Add file existence validation"
-        analysis["fix_code"] = f'# AUTO-FIX: File check\nimport os\nif not os.path.exists("{missing_path}"):\n    raise FileNotFoundError(f"Source not found: {missing_path}")'
-        analysis["confidence"] = "HIGH"
+    # --- Connection / network errors ---
+    if any(kw in error_lower for kw in ["connectionerror", "connection refused", "connection reset", "unreachable", "dns resolution failed"]):
+        host_match = re.search(r"(?:host|url|endpoint|connecting to)\s*[=:]?\s*['\"]?([^\s'\"]+)", error_text, re.IGNORECASE)
+        host = host_match.group(1) if host_match else "external service"
+        analysis["root_cause"] = f"Connection failure to: {host}"
+        analysis["explanation"] = f"Network request to '{host}' failed. Service may be down or network rules block access."
+        analysis["recommended_fix"] = "Add retry logic with exponential backoff"
+        analysis["fix_code"] = f'# AUTO-FIX: Retry logic for network calls\nimport time\ndef retry_request(func, max_retries=3, backoff=2):\n    for attempt in range(max_retries):\n        try:\n            return func()\n        except Exception as e:\n            if attempt == max_retries - 1:\n                raise\n            wait = backoff ** attempt\n            print(f"Attempt {{attempt+1}} failed: {{e}}. Retrying in {{wait}}s...")\n            time.sleep(wait)'
+        analysis["confidence"] = "MEDIUM"
+        return analysis
 
-    else:
-        analysis["root_cause"] = "Runtime error in notebook"
-        analysis["explanation"] = f"Error: {error_text[:300]}"
-        analysis["recommended_fix"] = "Add error handling"
-        analysis["fix_code"] = "# AUTO-FIX: Error handling wrapper\ntry:\n    # Original code here\n    pass\nexcept Exception as e:\n    print(f'Error encountered: {e}')\n    raise"
-        analysis["confidence"] = "LOW"
+    # --- Syntax / NameError / TypeError / ValueError ---
+    code_error_patterns = [
+        (r"nameerror.*?name ['\"]([^'\"]+)['\"].*?is not defined", "NameError"),
+        (r"typeerror.*?:(.+?)(?:\n|$)", "TypeError"),
+        (r"valueerror.*?:(.+?)(?:\n|$)", "ValueError"),
+        (r"syntaxerror.*?:(.+?)(?:\n|$)", "SyntaxError"),
+        (r"keyerror.*?['\"]?([^'\"]+)['\"]?", "KeyError"),
+        (r"indexerror.*?:(.+?)(?:\n|$)", "IndexError"),
+        (r"attributeerror.*?['\"]?([^'\"]+)['\"]?.*?has no attribute.*?['\"]?([^'\"]+)", "AttributeError"),
+    ]
+    for pattern, err_type in code_error_patterns:
+        match = re.search(pattern, error_text, re.IGNORECASE)
+        if match:
+            detail_info = match.group(1).strip() if match.lastindex >= 1 else ""
+            # Try to find the exact line from traceback
+            line_match = re.search(r"line (\d+)", error_text, re.IGNORECASE)
+            line_info = f" at line {line_match.group(1)}" if line_match else ""
 
+            analysis["root_cause"] = f"{err_type}: {detail_info}{line_info}"
+            analysis["explanation"] = f"Python {err_type} occurred: {detail_info}. {error_text[:200]}"
+            analysis["recommended_fix"] = f"Fix the {err_type} in the notebook code"
+
+            if err_type == "NameError":
+                analysis["fix_code"] = f'# AUTO-FIX: Define missing variable/import\n# The variable \'{detail_info}\' is used but not defined.\n# Check if this requires an import or prior cell execution.\ntry:\n    {detail_info}\nexcept NameError:\n    raise NameError("Variable \'{detail_info}\' not defined. Ensure all cells run in order or add missing import.")'
+            elif err_type == "KeyError":
+                analysis["fix_code"] = f'# AUTO-FIX: Safe key access\n# Use .get() instead of direct key access to handle missing keys gracefully\n# Replace: data["{detail_info}"]  -->  data.get("{detail_info}", None)'
+            elif err_type == "TypeError":
+                analysis["fix_code"] = f'# AUTO-FIX: Type validation\n# {err_type}: {detail_info}\n# Add type checking before the operation'
+            else:
+                analysis["fix_code"] = f'# AUTO-FIX: {err_type} resolution\n# Error: {detail_info}\n# Review the code{line_info} and fix the logic error'
+
+            analysis["confidence"] = "MEDIUM"
+            return analysis
+
+    # --- Spark / Java exceptions ---
+    spark_patterns = [
+        (r"org\.apache\.spark\.SparkException:(.+?)(?:\n|$)", "SparkException"),
+        (r"java\.lang\.(\w+Exception):(.+?)(?:\n|$)", "JavaException"),
+        (r"delta\.exceptions\.(\w+):(.+?)(?:\n|$)", "DeltaException"),
+    ]
+    for pattern, err_type in spark_patterns:
+        match = re.search(pattern, error_text, re.IGNORECASE)
+        if match:
+            exc_detail = match.group(1).strip() if match.lastindex >= 1 else error_text[:200]
+            analysis["root_cause"] = f"{err_type}: {exc_detail[:100]}"
+            analysis["explanation"] = f"Spark/Java error: {exc_detail[:300]}"
+            analysis["recommended_fix"] = f"Address the {err_type}"
+            analysis["fix_code"] = f'# AUTO-FIX: Handle {err_type}\n# Error: {exc_detail[:150]}\nspark.conf.set("spark.sql.adaptive.enabled", "true")\n# If this is a data issue, check source data quality'
+            analysis["confidence"] = "MEDIUM"
+            return analysis
+
+    # --- FALLBACK: Parse whatever we can from the error ---
+    # Even in fallback, try to extract something useful
+    # Look for the most informative line in the error
+    error_lines = [l.strip() for l in error_text.split("\n") if l.strip() and not l.strip().startswith("at ")]
+    key_error_line = ""
+    for line in error_lines:
+        if any(kw in line.lower() for kw in ["error", "exception", "failed", "cannot", "invalid", "missing"]):
+            key_error_line = line[:300]
+            break
+    if not key_error_line and error_lines:
+        key_error_line = error_lines[-1][:300]
+
+    analysis["root_cause"] = f"Runtime failure: {key_error_line[:150]}"
+    analysis["explanation"] = f"The job failed with: {key_error_line}. Full error: {error_text[:400]}"
+    analysis["recommended_fix"] = f"Fix based on error: {key_error_line[:100]}"
+    analysis["fix_code"] = f'# AUTO-FIX: Address runtime error\n# Error: {key_error_line[:200]}\n# Review and fix the above error in the notebook code.\n# Adding defensive checks:\nimport traceback\ntry:\n    pass  # Replace with the failing operation\nexcept Exception as e:\n    print(f"ERROR: {{e}}")\n    traceback.print_exc()\n    raise'
+    analysis["confidence"] = "LOW"
+    analysis["severity"] = "HIGH"
     return analysis
 
-# Run analysis
+
+# Run analysis on each failed job
 fix_recommendations = []
 
 for detail in failure_details:
@@ -336,14 +500,18 @@ for detail in failure_details:
     print(f"ANALYSIS: {detail['job_name']}")
     print(f"{'='*80}")
 
-    analysis = analyze_and_recommend_fix(detail)
+    analysis = intelligent_fix_generator(detail["full_error"], detail["notebook_content"])
     detail["analysis"] = analysis
     fix_recommendations.append(detail)
 
-    print(f"  Root Cause: {analysis['root_cause']}")
-    print(f"  Severity: {analysis['severity']}")
-    print(f"  Fix: {analysis['recommended_fix']}")
-    print(f"  Code:\n    {analysis['fix_code']}")
+    print(f"  Root Cause:  {analysis['root_cause']}")
+    print(f"  Severity:    {analysis['severity']}")
+    print(f"  Confidence:  {analysis['confidence']}")
+    print(f"  Explanation: {analysis['explanation'][:200]}")
+    print(f"  Fix:         {analysis['recommended_fix']}")
+    print(f"  Code:")
+    for line in analysis['fix_code'].split('\n'):
+        print(f"    {line}")
 
 if not failure_details:
     print("No failures to analyze.")
@@ -375,6 +543,10 @@ report_html = f"""
     .failure-card {{ background: #fff5f5; border: 1px solid #fed7d7; border-radius: 8px; padding: 20px; margin-bottom: 15px; }}
     .failure-title {{ font-size: 16px; font-weight: bold; color: #c53030; margin-bottom: 10px; }}
     .fix-code {{ background: #1e1e1e; color: #d4d4d4; padding: 12px; border-radius: 4px; font-family: monospace; font-size: 12px; white-space: pre-wrap; }}
+    .badge {{ display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: bold; }}
+    .badge-high {{ background: #fed7d7; color: #c53030; }}
+    .badge-critical {{ background: #c53030; color: white; }}
+    .badge-medium {{ background: #fefcbf; color: #975a16; }}
     .success-table {{ width: 100%; border-collapse: collapse; }}
     .success-table th {{ background: #f8f9fa; padding: 10px; text-align: left; border-bottom: 2px solid #dee2e6; }}
     .success-table td {{ padding: 8px 10px; border-bottom: 1px solid #eee; }}
@@ -382,7 +554,7 @@ report_html = f"""
 <div class="monitor-report">
     <div class="report-header">
         <h2 style="margin:0;">Job Monitoring Report</h2>
-        <p style="margin:5px 0 0; opacity:0.8;">Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+        <p style="margin:5px 0 0; opacity:0.8;">Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | Scanned: {total_jobs} jobs</p>
     </div>
     <div class="kpi-grid">
         <div class="kpi-card total"><div class="kpi-value">{total_jobs}</div><div class="kpi-label">Total Jobs</div></div>
@@ -393,18 +565,19 @@ report_html = f"""
 """
 
 if fix_recommendations:
-    report_html += "<h3>Failed Jobs - Root Cause & Auto-Fix</h3>"
+    report_html += "<h3>Failed Jobs - Diagnosis & Auto-Fix</h3>"
     for rec in fix_recommendations:
         a = rec["analysis"]
+        sev_class = "badge-critical" if a["severity"] == "CRITICAL" else "badge-high" if a["severity"] == "HIGH" else "badge-medium"
         report_html += f"""
     <div class="failure-card">
-        <div class="failure-title">X {rec['job_name']}</div>
-        <p><strong>Error Type:</strong> {rec['error_type']} | <strong>Severity:</strong> {a['severity']}</p>
+        <div class="failure-title">&#10060; {rec['job_name']}</div>
+        <p><span class="badge {sev_class}">{a['severity']}</span> | Confidence: {a['confidence']}</p>
         <p><strong>Root Cause:</strong> {a['root_cause']}</p>
-        <p><strong>Explanation:</strong> {a['explanation']}</p>
-        <p><strong>Fix:</strong> {a['recommended_fix']}</p>
+        <p><strong>Explanation:</strong> {a['explanation'][:300]}</p>
+        <p><strong>Recommended Fix:</strong> {a['recommended_fix']}</p>
         <div class="fix-code">{a['fix_code']}</div>
-        <p style="margin-top:10px;color:#2d5a87;"><strong>Action:</strong> Fix will be committed to GitHub feature branch for PR approval</p>
+        <p style="margin-top:10px;color:#2d5a87;"><strong>&#8594; Action:</strong> Fix auto-committed to GitHub feature branch for PR approval</p>
     </div>"""
 
 success_jobs = [j for j in job_status_list if j["status"] == "SUCCESS"]
@@ -466,10 +639,11 @@ if fix_recommendations:
             })
             current_content = base64.b64decode(export_resp["content"]).decode("utf-8")
 
-            # Apply fix: insert fix code after the first command separator
+            # Apply fix: insert fix code after the first COMMAND separator (after initial setup)
             fix_header = f"# --- AUTO-FIX by Job Monitor ({datetime.now().strftime('%Y-%m-%d %H:%M')}) ---"
+            fix_comment = f"# Root Cause: {analysis['root_cause']}"
             fix_footer = "# --- END AUTO-FIX ---"
-            fix_block = f"\n{fix_header}\n# Root Cause: {analysis['root_cause']}\n{fix_code}\n{fix_footer}\n"
+            fix_block = f"\n{fix_header}\n{fix_comment}\n{fix_code}\n{fix_footer}\n"
 
             if "# COMMAND ----------" in current_content:
                 parts = current_content.split("# COMMAND ----------", 2)
@@ -481,11 +655,10 @@ if fix_recommendations:
                 modified_content = fix_block + "\n\n" + current_content
 
             # Step 4: Determine repo file path
-            # Map workspace path to repo path
             notebook_filename = notebook_path.split("/")[-1]
             repo_file_path = f"{REPO_NOTEBOOK_FOLDER}/{notebook_filename}.py"
 
-            # Step 5: Check if file exists on the branch (get SHA if it does)
+            # Step 5: Check if file exists on the branch
             file_sha = None
             try:
                 existing = github_get(f"/repos/{GITHUB_REPO}/contents/{repo_file_path}?ref={branch_name}")
@@ -494,8 +667,9 @@ if fix_recommendations:
                 pass
 
             # Step 6: Commit the fixed file to feature branch
+            commit_msg = f"fix({clean_name}): {analysis['root_cause'][:60]}\n\nDiagnosis: {analysis['explanation'][:200]}\nFix: {analysis['recommended_fix']}"
             commit_data = {
-                "message": f"fix: Auto-fix for {job_name} - {analysis['root_cause']}",
+                "message": commit_msg,
                 "content": base64.b64encode(modified_content.encode("utf-8")).decode("utf-8"),
                 "branch": branch_name
             }
@@ -504,17 +678,14 @@ if fix_recommendations:
 
             github_put(f"/repos/{GITHUB_REPO}/contents/{repo_file_path}", commit_data)
             print(f"  Fix committed: {repo_file_path}")
-
-            # Step 7: The auto-PR workflow will trigger automatically
-            pr_url = f"https://github.com/{GITHUB_REPO}/pull"
-            print(f"  Auto-PR will be created by GitHub Actions workflow")
-            print(f"  Branch: {branch_name} -> main")
+            print(f"  Auto-PR will be created by GitHub Actions")
 
             created_prs.append({
                 "job_name": job_name,
                 "branch": branch_name,
                 "root_cause": analysis["root_cause"],
                 "fix": analysis["recommended_fix"],
+                "severity": analysis["severity"],
                 "repo_file": repo_file_path,
                 "pr_url": f"https://github.com/{GITHUB_REPO}/pulls",
                 "status": "PR_PENDING"
@@ -527,9 +698,10 @@ if fix_recommendations:
                 "branch": "N/A",
                 "root_cause": analysis["root_cause"],
                 "fix": analysis["recommended_fix"],
+                "severity": analysis["severity"],
                 "repo_file": "N/A",
                 "pr_url": "N/A",
-                "status": f"FAILED: {str(e)}"
+                "status": f"COMMIT_FAILED: {str(e)[:100]}"
             })
 
 else:
@@ -543,36 +715,45 @@ else:
 # COMMAND ----------
 
 print("="*80)
-print("FIX SUBMISSION SUMMARY")
+print("JOB MONITOR - FIX SUBMISSION SUMMARY")
 print("="*80)
 
 if created_prs:
-    print(f"\nTotal fixes submitted: {len([p for p in created_prs if p['status'] == 'PR_PENDING'])}")
-    print(f"Failed submissions: {len([p for p in created_prs if 'FAILED' in p['status']])}")
+    submitted = [p for p in created_prs if p["status"] == "PR_PENDING"]
+    failed_submissions = [p for p in created_prs if "FAILED" in p["status"]]
+
+    print(f"\nFixes submitted via PR: {len(submitted)}")
+    print(f"Failed to submit:       {len(failed_submissions)}")
     print()
 
-    for i, pr in enumerate(created_prs, 1):
-        status_icon = "[OK]" if pr["status"] == "PR_PENDING" else "[!!]"
-        print(f"{status_icon} Fix #{i}: {pr['job_name']}")
+    for i, pr in enumerate(submitted, 1):
+        print(f"[OK] Fix #{i}: {pr['job_name']}")
         print(f"      Root Cause: {pr['root_cause']}")
-        print(f"      Fix: {pr['fix']}")
-        print(f"      Branch: {pr['branch']}")
-        print(f"      File: {pr['repo_file']}")
-        print(f"      Status: {pr['status']}")
-        print(f"      PRs: {pr['pr_url']}")
+        print(f"      Severity:   {pr['severity']}")
+        print(f"      Fix:        {pr['fix']}")
+        print(f"      Branch:     {pr['branch']}")
+        print(f"      File:       {pr['repo_file']}")
+        print(f"      PRs:        {pr['pr_url']}")
+        print()
+
+    if failed_submissions:
+        print("\n--- FAILED SUBMISSIONS ---")
+        for pr in failed_submissions:
+            print(f"[!!] {pr['job_name']}: {pr['status']}")
         print()
 
     print("-"*80)
-    print("NEXT STEPS:")
-    print("  1. GitHub Actions auto-creates Pull Requests for each fix branch")
-    print("  2. Admin reviews the PR and approves the merge")
-    print("  3. Once merged to main, Databricks Repos syncs automatically")
-    print("  4. Re-run the original failed job to verify the fix")
+    print("GOVERNANCE WORKFLOW:")
+    print("  1. GitHub Actions creates Pull Request automatically for each fix branch")
+    print("  2. Admin/Approver reviews the code change in the PR")
+    print("  3. Admin approves and merges PR to main")
+    print("  4. Databricks Repos syncs with updated main branch")
+    print("  5. Re-run the failed job — fix is now deployed")
     print("-"*80)
 
     # Display as table
     pr_df = spark.createDataFrame([Row(**p) for p in created_prs])
     display(pr_df)
 else:
-    print("\nAll jobs are healthy - no fixes were needed!")
-    print("Run this monitoring job periodically to catch failures early.")
+    print("\nAll jobs are healthy — no fixes needed!")
+    print("Schedule this monitoring job to run periodically for continuous oversight.")
