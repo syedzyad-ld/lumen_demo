@@ -122,29 +122,19 @@ for job in all_jobs:
             duration_str = f"{duration_ms // 60000}m {(duration_ms % 60000) // 1000}s"
             error_msg = state.get("state_message", "")
 
-            # Get notebook path from task config (handle both single-task and multi-task jobs)
+            # Get notebook path from job settings (runs/list may not include task details)
             notebook_path = ""
-            task_run_ids = []
-            tasks = latest_run.get("tasks", [])
-            if tasks:
-                for task in tasks:
-                    if task.get("notebook_task"):
-                        notebook_path = task["notebook_task"].get("notebook_path", "")
-                    # Collect task-level run IDs for error extraction
-                    if task.get("run_id"):
-                        task_run_ids.append(task["run_id"])
-                    # Also get error from task state
-                    task_state = task.get("state", {})
-                    if task_state.get("result_state") == "FAILED" and not error_msg:
-                        error_msg = task_state.get("state_message", "")
-            elif latest_run.get("task", {}).get("notebook_task"):
-                notebook_path = latest_run["task"]["notebook_task"].get("notebook_path", "")
+            job_tasks = job.get("settings", {}).get("tasks", [])
+            if job_tasks:
+                for jt in job_tasks:
+                    if jt.get("notebook_task", {}).get("notebook_path"):
+                        notebook_path = jt["notebook_task"]["notebook_path"]
+                        break
 
             job_status_list.append({
                 "job_id": job_id,
                 "job_name": job_name,
                 "run_id": run_id,
-                "task_run_ids": task_run_ids,
                 "status": result_state,
                 "start_time": start_time,
                 "duration": duration_str,
@@ -156,7 +146,6 @@ for job in all_jobs:
                 "job_id": job_id,
                 "job_name": job_name,
                 "run_id": None,
-                "task_run_ids": [],
                 "status": "NO_RUNS",
                 "start_time": "N/A",
                 "duration": "N/A",
@@ -168,7 +157,6 @@ for job in all_jobs:
             "job_id": job_id,
             "job_name": job_name,
             "run_id": None,
-            "task_run_ids": [],
             "status": "ERROR_FETCHING",
             "start_time": "N/A",
             "duration": "N/A",
@@ -184,15 +172,15 @@ for job in job_status_list:
     print(f"[{icon}] {job['job_name']:<38} {job['status']:<15} {job['start_time']:<20} {job['duration']:<12}")
 
 if job_status_list:
-    display_list = [{k: v for k, v in item.items() if k != "task_run_ids"} for item in job_status_list]
-    status_df = spark.createDataFrame([Row(**item) for item in display_list])
+    status_df = spark.createDataFrame([Row(**item) for item in job_status_list])
     display(status_df.select("job_id", "job_name", "status", "start_time", "duration", "error_message"))
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Cell 3: Extract FULL Error Details (Multi-Source)
-# MAGIC Pulls error from: run state_message, get-output API, task-level outputs, and cluster logs.
+# MAGIC ## Cell 3: Extract FULL Error Details (Deep Task-Level Extraction)
+# MAGIC For multi-task jobs, the parent run only says "Workload failed, see run output".
+# MAGIC The REAL error lives in the task-level run output. This cell digs into each failed task.
 
 # COMMAND ----------
 
@@ -216,50 +204,87 @@ for job in failed_jobs:
         "notebook_content": ""
     }
 
-    # Source 1: state_message from run (already have it)
     collected_errors = []
-    if job["error_message"]:
+
+    # STEP 1: Get full run details via runs/get (this returns task-level run_ids)
+    run_detail = api_get_safe("/api/2.1/jobs/runs/get", params={"run_id": job["run_id"]})
+
+    if run_detail and run_detail.get("tasks"):
+        print(f"  Multi-task job detected: {len(run_detail['tasks'])} tasks")
+
+        for task in run_detail["tasks"]:
+            task_key = task.get("task_key", "unknown")
+            task_state = task.get("state", {})
+            task_result = task_state.get("result_state", "")
+            task_run_id = task.get("run_id")
+
+            # Only dig into FAILED tasks (skip UPSTREAM_FAILED, SKIPPED)
+            if task_result != "FAILED":
+                continue
+
+            print(f"  Failed task: '{task_key}' (task run_id: {task_run_id})")
+
+            # Get notebook path from this specific task
+            if task.get("notebook_task", {}).get("notebook_path") and not detail["notebook_path"]:
+                detail["notebook_path"] = task["notebook_task"]["notebook_path"]
+
+            # STEP 2: Call get-output on the TASK's run_id — this is where the real error lives
+            if task_run_id:
+                task_output = api_get_safe("/api/2.1/jobs/runs/get-output", params={"run_id": task_run_id})
+                if task_output:
+                    if task_output.get("error"):
+                        collected_errors.append(f"[Task: {task_key}] {task_output['error']}")
+                        print(f"    Error: {task_output['error'][:200]}")
+                    if task_output.get("error_trace"):
+                        collected_errors.append(task_output["error_trace"])
+                        print(f"    Trace: {task_output['error_trace'][:200]}...")
+                else:
+                    print(f"    get-output returned nothing for task run_id {task_run_id}")
+
+            # Also capture task state_message if useful
+            task_msg = task_state.get("state_message", "")
+            if task_msg and "see run output" not in task_msg.lower():
+                collected_errors.append(f"[Task: {task_key}] {task_msg}")
+
+    else:
+        # Single-task job or no tasks in response — try get-output on parent run_id directly
+        print(f"  Single-task job, fetching output from run_id: {job['run_id']}")
+        run_output = api_get_safe("/api/2.1/jobs/runs/get-output", params={"run_id": job["run_id"]})
+        if run_output:
+            if run_output.get("error"):
+                collected_errors.append(run_output["error"])
+                print(f"    Error: {run_output['error'][:200]}")
+            if run_output.get("error_trace"):
+                collected_errors.append(run_output["error_trace"])
+
+    # STEP 3: If still no real error found, fall back to state_message
+    if not collected_errors and job["error_message"]:
         collected_errors.append(job["error_message"])
 
-    # Source 2: get-output on top-level run_id (works for single-task jobs)
-    run_output = api_get_safe("/api/2.1/jobs/runs/get-output", params={"run_id": job["run_id"]})
-    if run_output:
-        if run_output.get("error"):
-            collected_errors.append(run_output["error"])
-        if run_output.get("error_trace"):
-            collected_errors.append(run_output["error_trace"])
+    # Filter out generic "Workload failed, see run output" messages — they're useless
+    real_errors = [e for e in collected_errors if "see run output for details" not in e.lower()]
+    if not real_errors:
+        real_errors = collected_errors  # Keep them if that's all we have
 
-    # Source 3: get-output on each task-level run_id (works for multi-task jobs)
-    for task_run_id in job.get("task_run_ids", []):
-        task_output = api_get_safe("/api/2.1/jobs/runs/get-output", params={"run_id": task_run_id})
-        if task_output:
-            if task_output.get("error"):
-                collected_errors.append(task_output["error"])
-            if task_output.get("error_trace"):
-                collected_errors.append(task_output["error_trace"])
+    # Combine all error sources, deduplicate while preserving order
+    seen = set()
+    unique_errors = []
+    for e in real_errors:
+        if e.strip() and e not in seen:
+            seen.add(e)
+            unique_errors.append(e)
 
-    # Source 4: Get run details for more state info
-    run_detail = api_get_safe("/api/2.1/jobs/runs/get", params={"run_id": job["run_id"]})
-    if run_detail:
-        # Check tasks within the run for errors
-        for task in run_detail.get("tasks", []):
-            task_state = task.get("state", {})
-            if task_state.get("state_message"):
-                collected_errors.append(task_state["state_message"])
+    detail["full_error"] = "\n---\n".join(unique_errors) if unique_errors else "Error details could not be retrieved"
 
-    # Combine all error sources, deduplicate
-    all_error_text = "\n---\n".join(list(dict.fromkeys([e for e in collected_errors if e.strip()])))
-    detail["full_error"] = all_error_text if all_error_text else "Error details could not be retrieved from API"
-
-    print(f"  Error sources found: {len(collected_errors)}")
+    print(f"\n  Total error sources: {len(unique_errors)}")
     print(f"  Full error ({len(detail['full_error'])} chars):")
-    print(f"  {detail['full_error'][:500]}")
+    print(f"  {detail['full_error'][:600]}")
 
-    # Get notebook source for context
-    if job["notebook_path"]:
+    # STEP 4: Get notebook source for context
+    if detail["notebook_path"]:
         try:
             export_resp = api_get("/api/2.0/workspace/export", params={
-                "path": job["notebook_path"],
+                "path": detail["notebook_path"],
                 "format": "SOURCE"
             })
             detail["notebook_content"] = base64.b64decode(export_resp.get("content", "")).decode("utf-8")
